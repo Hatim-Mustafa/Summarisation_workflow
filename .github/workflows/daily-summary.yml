@@ -1,0 +1,42 @@
+name: Daily work summary
+
+on:
+  schedule:
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-summary
+  cancel-in-progress: false
+
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GIT_ORG: synthova
+      GIT_AUTHOR: ${{ vars.GIT_AUTHOR }}
+      GITHUB_MIN_REPOS: "9"
+      SUMMARY_MODEL: deepseek-v4.1-flash
+      SUMMARY_TZ: Asia/Karachi
+      TZ: Asia/Karachi
+      GH_TOKEN: ${{ secrets.SYNTHOVA_PAT }}
+      CLOCKIFY_API_KEY: ${{ secrets.CLOCKIFY_API_KEY }}
+      OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+      GCHAT_WEBHOOK_URL: ${{ secrets.GCHAT_WEBHOOK_URL }}
+    steps:
+      - name: Check out automation repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate and send summary
+        run: node daily-summary.mjs --require-github

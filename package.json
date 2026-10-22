@@ -1,0 +1,14 @@
+{
+  "name": "summay-automation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local daily work summary from git commits and Clockify time entries",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node daily-summary.mjs",
+    "dry": "node daily-summary.mjs --dry-run"
+  }
+}
