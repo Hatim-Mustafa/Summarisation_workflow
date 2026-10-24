@@ -542,7 +542,15 @@ async function collectGitHub(orgs, from, to, token) {
     );
   }
 
-  log(`GitHub API: ${repos.length} repositories in ${orgs.join(", ")}`);
+  const activeRepos = repos.filter((repo) => {
+    if (!repo.pushed_at) return false;
+    const pushedAt = Date.parse(repo.pushed_at);
+    return Number.isFinite(pushedAt) ? pushedAt >= from.getTime() : true;
+  });
+
+  log(
+    `GitHub API: ${repos.length} repositories in ${orgs.join(", ")} (${activeRepos.length} pushed in the window)`,
+  );
 
   const repositories = [];
   let totalCommits = 0;
@@ -550,7 +558,7 @@ async function collectGitHub(orgs, from, to, token) {
   let totalDeletions = 0;
   let totalFiles = 0;
 
-  for (const repo of repos) {
+  for (const repo of activeRepos) {
     const fullName = repo.full_name;
     let branches = [];
 
@@ -658,6 +666,7 @@ async function collectGitHub(orgs, from, to, token) {
 
   return {
     scannedRepositories: repos.length,
+    activeRepositories: activeRepos.length,
     repositoriesWithCommits: repositories.length,
     totalCommits,
     totalInsertions,
