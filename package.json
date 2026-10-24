@@ -10,5 +10,8 @@
   "scripts": {
     "start": "node daily-summary.mjs",
     "dry": "node daily-summary.mjs --dry-run"
+  },
+  "dependencies": {
+    "nodemailer": "^10.2.1"
   }
 }

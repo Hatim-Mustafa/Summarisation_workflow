@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 15
     env:
       GIT_ORG: synthova
-      GIT_AUTHOR: ${{ vars.GIT_AUTHOR }}
+      GIT_AUTHOR: hatimmustafa108@gmail.com,Hatim-Mustafa
       GITHUB_MIN_REPOS: "9"
       SUMMARY_MODEL: deepseek-v4.1-flash
       SUMMARY_TZ: Asia/Karachi
@@ -26,7 +26,9 @@ jobs:
       GH_TOKEN: ${{ secrets.SYNTHOVA_PAT }}
       CLOCKIFY_API_KEY: ${{ secrets.CLOCKIFY_API_KEY }}
       OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-      GCHAT_WEBHOOK_URL: ${{ secrets.GCHAT_WEBHOOK_URL }}
+      GMAIL_USER: hatimmustafa108@gmail.com
+      GMAIL_TO: hatimmustafa108@gmail.com
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
     steps:
       - name: Check out automation repo
         uses: actions/checkout@v4
@@ -38,5 +40,8 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install dependencies
+        run: npm ci
+
       - name: Generate and send summary
-        run: node daily-summary.mjs --require-github
+        run: node daily-summary.mjs --require-github --require-email

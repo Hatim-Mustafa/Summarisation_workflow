@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
-const SCRIPT_DIR = import.meta.dirname;
+const SCRIPT_DIR = resolve(import.meta.dirname);
 const PROJECTS_ROOT = dirname(SCRIPT_DIR);
 const DEFAULT_MODEL = "deepseek-v4.1-flash";
 
@@ -65,8 +65,10 @@ function parseArgs(argv) {
     model: null,
     dryRun: false,
     noSend: false,
+    noEmail: false,
     localOnly: false,
     requireGithub: false,
+    requireEmail: false,
     requireClockify: false,
     help: false,
   };
@@ -103,11 +105,17 @@ function parseArgs(argv) {
       case "--no-send":
         opts.noSend = true;
         break;
+      case "--no-email":
+        opts.noEmail = true;
+        break;
       case "--local":
         opts.localOnly = true;
         break;
       case "--require-github":
         opts.requireGithub = true;
+        break;
+      case "--require-email":
+        opts.requireEmail = true;
         break;
       case "--require-clockify":
         opts.requireClockify = true;
@@ -134,8 +142,10 @@ Options:
       --model <id>         OpenCode Go model ID (default ${DEFAULT_MODEL})
       --dry-run            Print collected activity instead of calling the model
       --no-send            Do not post to Google Chat
+      --no-email           Do not send the email
       --local              Skip the GitHub API and use local clones only
       --require-github     Fail unless the GitHub API path is used
+      --require-email      Fail unless the email is sent
       --require-clockify   Fail if Clockify is unavailable
   -h, --help               Show this help
 
@@ -144,13 +154,18 @@ Environment:
   CLOCKIFY_API_KEY, CLOCKIFY_WORKSPACE_ID, CLOCKIFY_USER_ID
   OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL, SUMMARY_MODEL
   GITHUB_TOKEN or GH_TOKEN, GIT_ORG, GITHUB_MIN_REPOS, GCHAT_WEBHOOK_URL
+  GMAIL_USER, GMAIL_TO, GMAIL_APP_PASSWORD
+  SMTP_HOST, SMTP_PORT, SMTP_SECURE (optional overrides)
 
-With GITHUB_TOKEN and GIT_ORG set, the script tries the GitHub API first
+With GH_TOKEN and GIT_ORG set, the script tries the GitHub API first
 and falls back to local clones on any API failure. Use --local to force
 the local path.
 
 When GCHAT_WEBHOOK_URL is set, the summary is posted to that Google Chat
 space automatically. Use --no-send to suppress it for a run.
+
+When GMAIL_USER and GMAIL_APP_PASSWORD are set, the summary is emailed
+automatically. Use --no-email to suppress it for a run.
 
 Secrets are read from the environment or a .env file next to this script.
 If OPENCODE_GO_API_KEY is not set, the OpenCode Go key is read from the
@@ -195,7 +210,7 @@ function discoverSiblingRepos(root) {
   return readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => join(root, entry.name))
-    .filter((path) => path !== SCRIPT_DIR && existsSync(join(path, ".git")));
+    .filter((path) => resolve(path) !== SCRIPT_DIR && existsSync(join(path, ".git")));
 }
 
 function remoteOwner(url) {
@@ -244,8 +259,10 @@ function resolveRepositories(opts, logger = log) {
   }
 
   if (candidates.length === 0) {
-    if (isGitRepo(process.cwd())) {
-      candidates = [process.cwd()];
+    const cwd = resolve(process.cwd());
+    const insideScriptRepo = cwd === SCRIPT_DIR || cwd.startsWith(SCRIPT_DIR + sep);
+    if (!insideScriptRepo && isGitRepo(cwd)) {
+      candidates = [cwd];
       source = "current directory";
     } else {
       candidates = discoverSiblingRepos(PROJECTS_ROOT);
@@ -1063,6 +1080,157 @@ async function sendToGoogleChat(webhookUrl, text) {
   throw lastError || new Error("Google Chat webhook failed.");
 }
 
+function escapeHtml(value) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function inlineEmailHtml(value) {
+  return escapeHtml(value)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/__(.+?)__/g, "<em>$1</em>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2">$1</a>');
+}
+
+function markdownToEmailHtml(markdown) {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const out = [];
+  let inList = false;
+  let inTable = false;
+  let tableRow = 0;
+
+  const closeList = () => {
+    if (inList) {
+      out.push("</ul>");
+      inList = false;
+    }
+  };
+
+  const closeTable = () => {
+    if (inTable) {
+      out.push("</table>");
+      inTable = false;
+      tableRow = 0;
+    }
+  };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) {
+      closeList();
+      closeTable();
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})[ \t]+(.+)$/);
+    if (heading) {
+      closeList();
+      closeTable();
+      const level = Math.min(heading[1].length + 1, 6);
+      out.push(`<h${level}>${inlineEmailHtml(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    const bullet = line.match(/^[ \t]*[-*+][ \t]+(.+)$/);
+    if (bullet) {
+      closeTable();
+      if (!inList) {
+        out.push("<ul>");
+        inList = true;
+      }
+      out.push(`<li>${inlineEmailHtml(bullet[1])}</li>`);
+      continue;
+    }
+
+    if (/^[ \t]*\|[-:|\t ]+\|[ \t]*$/.test(line)) continue;
+
+    const table = line.match(/^[ \t]*\|(.+)\|[ \t]*$/);
+    if (table) {
+      closeList();
+      const cells = table[1].split("|").map((cell) => cell.trim());
+      if (!inTable) {
+        out.push(
+          '<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:13px">',
+        );
+        inTable = true;
+        tableRow = 0;
+      }
+      const tag = tableRow === 0 ? "th" : "td";
+      out.push(
+        `<tr>${cells.map((cell) => `<${tag}>${inlineEmailHtml(cell)}</${tag}>`).join("")}</tr>`,
+      );
+      tableRow += 1;
+      continue;
+    }
+
+    closeList();
+    closeTable();
+    out.push(`<p>${inlineEmailHtml(line)}</p>`);
+  }
+
+  closeList();
+  closeTable();
+
+  return `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#222">${out.join("\n")}</body></html>`;
+}
+
+function toEmailText(markdown) {
+  return markdown
+    .replace(/^#{1,6}[ \t]+/gm, "")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^[ \t]*\|[-:|\t ]+\|[ \t]*$/gm, "")
+    .replace(/^[ \t]*\|(.+)\|[ \t]*$/gm, (_, row) =>
+      row.split("|").map((cell) => cell.trim()).join(" | "),
+    )
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "$1 ($2)")
+    .trim();
+}
+
+function emailSubject() {
+  const date = new Intl.DateTimeFormat("en-CA", {
+    timeZone: summaryTimeZone(),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  return `Daily Work Summary - ${date}`;
+}
+
+async function sendEmail({ user, pass, to, summary }) {
+  const { default: nodemailer } = await import("nodemailer");
+  const host = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
+  const port = Number(process.env.SMTP_PORT || 465);
+  const secure = (process.env.SMTP_SECURE || "true").toLowerCase() !== "false";
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+    connectionTimeout: 30000,
+    greetingTimeout: 30000,
+    socketTimeout: 30000,
+  });
+
+  try {
+    await transporter.sendMail({
+      from: `"Daily Summary" <${user}>`,
+      to,
+      subject: emailSubject(),
+      text: toEmailText(summary),
+      html: markdownToEmailHtml(summary),
+    });
+  } finally {
+    transporter.close();
+  }
+}
+
 function fallbackSummary(activity) {
   const lines = ["## Summary"];
   lines.push(
@@ -1129,9 +1297,9 @@ async function main() {
     return localRoots;
   };
 
-  const getLocalGit = () => {
+  const getLocalGit = (quiet = false) => {
     if (!localGit) {
-      localGit = collectGit(getLocalRoots(false), from, to);
+      localGit = collectGit(getLocalRoots(quiet), from, to);
     }
     return localGit;
   };
@@ -1155,7 +1323,7 @@ async function main() {
   }
 
   if (git && git.totalCommits === 0) {
-    const local = getLocalGit();
+    const local = getLocalGit(true);
     if (local.totalCommits > 0) {
       log(`GitHub API returned no commits, but local clones have ${local.totalCommits}; using local git.`);
       git = local;
@@ -1166,7 +1334,7 @@ async function main() {
   if (git && gitSource === "github") {
     const roots = getLocalRoots(true);
     if (git.scannedRepositories < roots.length) {
-      const local = getLocalGit();
+      const local = getLocalGit(true);
       if (local.totalCommits > 0) {
         log(
           `GitHub API sees only ${git.scannedRepositories} of ${roots.length} local synthova repositories; using local git (check token approval/repository access).`,
@@ -1269,6 +1437,35 @@ async function main() {
       log(`Google Chat send failed: ${err.message}`);
       process.exitCode = 1;
     }
+  }
+
+  const emailUser = (process.env.GMAIL_USER || process.env.SMTP_USER || "").trim();
+  const emailPass =
+    (process.env.GMAIL_APP_PASSWORD || "").replace(/\s+/g, "") ||
+    (process.env.SMTP_PASS || "").trim();
+  const emailTo = (process.env.GMAIL_TO || emailUser).trim();
+
+  const missingEmail = [];
+  if (!emailUser) missingEmail.push("GMAIL_USER");
+  if (!emailPass) missingEmail.push("GMAIL_APP_PASSWORD");
+  if (!emailTo) missingEmail.push("GMAIL_TO");
+
+  if (opts.noEmail) {
+    log("Email send skipped (--no-email).");
+  } else if (missingEmail.length === 0) {
+    log(`Sending summary email to ${emailTo}...`);
+    try {
+      await sendEmail({ user: emailUser, pass: emailPass, to: emailTo, summary });
+      log(`Emailed summary to ${emailTo}.`);
+    } catch (err) {
+      log(`Email send failed: ${err.message}`);
+      process.exitCode = 1;
+    }
+  } else if (opts.requireEmail) {
+    log(`Email required but missing: ${missingEmail.join(", ")}.`);
+    process.exitCode = 1;
+  } else {
+    log(`Email skipped: missing ${missingEmail.join(", ")}.`);
   }
 }
 
